@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>
+<style>
+html, body, #map { margin: 0; padding: 0; width: 100%; height: 100%; }
+/* 일반 판매점은 지도 색과 겹치지 않는 진한 파란 점, 1등 배출점은 그보다 큰 빨간 말풍선 핀으로 띄운다. */
+.shop { width: 16px; height: 16px; border-radius: 50%; background: #1565C0; border: 2.5px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
+.shop.hit { background: #E53935; }
+/* 1등 배출점은 빨간 점 바로 위에 말풍선을 띄운다. 말풍선 꼬리가 점을 가리킨다. */
+.win { position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%); margin-bottom: 9px; padding: 4px 8px; border-radius: 14px; background: #E53935; border: 2px solid #fff;
+       color: #fff; font: bold 13px/16px sans-serif; white-space: nowrap; box-shadow: 0 2px 6px rgba(0,0,0,.45); }
+.win:after { content: ''; position: absolute; left: 50%; bottom: -8px; margin-left: -6px;
+             border-width: 7px 6px 0; border-style: solid; border-color: #E53935 transparent transparent; }
+.info { padding: 10px 12px; font: 13px/1.5 sans-serif; color: #222; max-width: 220px; }
+.info b { font-size: 14px; }
+.info .count { color: #E53935; font-weight: bold; }
+</style>
+<!-- 주변 탭 지도. lotto-map 저장소의 index.html 로 올리고 UI_Shop 이 그 주소(GitHub Pages)를 웹뷰로 연다. ncpKeyId 는 NCP Maps 의 Client ID -->
+<script src='https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=2tphxhc8z9'></script>
+</head>
+<body>
+<div id='map'></div>
+<script>
+function toUnity(msg) {
+    if (window.Unity && window.Unity.call) {
+        window.Unity.call(msg);
+    }
+}
+
+// 키가 틀리거나 등록한 Web 서비스 URL 과 페이지 주소가 다르면 네이버가 이 함수를 부른다.
+window.navermap_authFailure = function () {
+    toUnity('auth_failure');
+};
+
+// 페이지 안의 스크립트 오류는 웹뷰 밖에서 보이지 않으므로 Unity 콘솔로 넘긴다.
+window.onerror = function (message, source, line) {
+    toUnity('error:' + message + ' (line ' + line + ')');
+};
+
+// 위치를 받기 전에는 서울시청을 보여준다. UI_Shop 의 기본 위치와 같다.
+// 손가락으로 벌리고 오므려도 확대·축소되지만, PC 와 한 손 조작을 위해 오른쪽 아래에 +/- 버튼도 둔다.
+var map = new naver.maps.Map('map', {
+    center: new naver.maps.LatLng(37.5666, 126.9784),
+    zoom: 16,
+    zoomControl: true,
+    zoomControlOptions: {
+        position: naver.maps.Position.RIGHT_BOTTOM,
+        style: naver.maps.ZoomControlStyle.SMALL
+    }
+});
+var myMarker = null;
+
+// UI_Shop 이 EvaluateJS 로 부른다. mine 이 true 면 실제 현재 위치라 내 위치 마커를 찍는다.
+// move 가 false 면 지도는 그대로 두고 마커만 옮긴다.
+function setCenter(lat, lng, mine, move) {
+    var pos = new naver.maps.LatLng(lat, lng);
+    if (move) {
+        map.setCenter(pos);
+    }
+    if (mine) {
+        if (myMarker == null) {
+            myMarker = new naver.maps.Marker({ position: pos, map: map });
+        } else {
+            myMarker.setPosition(pos);
+        }
+    }
+    // 처음 뜰 때의 idle 은 Unity 와 연결되기 전이라 버려질 수 있고, 중심이 그대로면 idle 이 다시 오지 않는다.
+    // 그래서 UI_Shop 이 페이지 로딩 뒤 setCenter 를 부를 때 범위를 직접 한 번 더 알려준다.
+    reportBounds();
+}
+
+// 지도를 움직이고 멈출 때마다 보이는 범위를 알려주면 UI_Shop 이 그 안의 판매점을 setShops 로 보내준다.
+function reportBounds() {
+    var bounds = map.getBounds();
+    var sw = bounds.getSW();
+    var ne = bounds.getNE();
+    toUnity('bounds:' + sw.lat() + ',' + sw.lng() + ',' + ne.lat() + ',' + ne.lng());
+}
+naver.maps.Event.addListener(map, 'idle', reportBounds);
+
+var shopMarkers = [];
+var infoWindow = new naver.maps.InfoWindow({ borderWidth: 0, disableAnchor: false });
+naver.maps.Event.addListener(map, 'click', function () {
+    infoWindow.close();
+});
+
+// list 항목: n 상호, a 주소, y 위도, x 경도, w 1등 횟수. 1등 배출점은 빨간 핀에 횟수를 적어 구분한다.
+function setShops(list) {
+    try {
+        drawShops(list);
+    } catch (e) {
+        toUnity('error:setShops ' + e);
+    }
+}
+
+function drawShops(list) {
+    for (var i = 0; i < shopMarkers.length; i++) {
+        shopMarkers[i].setMap(null);
+    }
+    shopMarkers = [];
+
+    for (var i = 0; i < list.length; i++) {
+        var shop = list[i];
+        var win = shop.w > 0;
+        var marker = new naver.maps.Marker({
+            position: new naver.maps.LatLng(shop.y, shop.x),
+            map: map,
+            // 1등 배출점이 일반 판매점에 가려지지 않게 위로 올린다.
+            zIndex: win ? 200 + shop.w : 100,
+            // 점의 가운데가 판매점 위치에 오도록 붙인다. (점 16px + 테두리 2.5px x 2 = 21px)
+            icon: {
+                content: win
+                    ? "<div style='position: relative;'><div class='shop hit'></div><div class='win'>1등 " + shop.w + "회</div></div>"
+                    : "<div class='shop'></div>",
+                anchor: new naver.maps.Point(10.5, 10.5)
+            }
+        });
+        naver.maps.Event.addListener(marker, 'click', openInfo.bind(null, marker, shop));
+        shopMarkers.push(marker);
+    }
+}
+
+// 상호와 주소에 특수문자가 있어도 깨지지 않게 HTML 문자열이 아니라 textContent 로 넣는다.
+function openInfo(marker, shop) {
+    var box = document.createElement('div');
+    box.className = 'info';
+    var name = document.createElement('b');
+    name.textContent = shop.n;
+    box.appendChild(name);
+    var address = document.createElement('div');
+    address.textContent = shop.a;
+    box.appendChild(address);
+    if (shop.w > 0) {
+        var win = document.createElement('div');
+        win.className = 'count';
+        win.textContent = '1등 ' + shop.w + '회 배출';
+        box.appendChild(win);
+    }
+    infoWindow.setContent(box);
+    infoWindow.open(map, marker);
+}
+</script>
+</body>
+</html>
